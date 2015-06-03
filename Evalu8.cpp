@@ -1,7 +1,7 @@
 //=======================================================================================
 // Name        : Evalu8.cpp
 // Author      : Vidur Prasad
-// Version     : 0.3.2
+// Version     : 1.0.0
 // Copyright   : APTIMA Inc.
 // Description : Evaluate drone footage to asses visual clutter based load
 // Error Messages : 1 --> Image cannot be read or is empty
