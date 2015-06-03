@@ -1,7 +1,7 @@
 //=======================================================================================
 // Name        : Evalu8.cpp
 // Author      : Vidur Prasad
-// Version     : 1.0.0
+// Version     : 1.0.1
 // Copyright   : APTIMA Inc.
 // Description : Evaluate drone footage to asses visual clutter based load
 // Error Messages : 1 --> Image cannot be read or is empty
@@ -22,6 +22,8 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/video/tracking.hpp>
 #include "opencv2/nonfree/nonfree.hpp"
+#include "opencv2/gpu/gpu.hpp"
+#include <opencv2/nonfree/ocl.hpp>
 
 //include c++ files
 #include <iostream>
@@ -34,6 +36,11 @@
 #include <stdlib.h>
 #include <limits>
 #include <math.h>
+#include <algorithm>
+#include <vector>
+
+template <typename T, size_t N> const T* mybegin(const T (&a)[N]) { return a; }
+template <typename T, size_t N> const T* myend  (const T (&a)[N]) { return a+N; }
 
 //namespaces for convenience
 using namespace cv;
@@ -53,11 +60,10 @@ static void drawOptFlowMap(const Mat& flow, Mat& cflowmap, int step,
         }
 }
 
-int computeOpticalFlowAnalysis(/*vector <Mat> framesForOFA,*/ Mat prevFrame, Mat currFrame,  int i)
+long double computeOpticalFlowAnalysis(/*vector <Mat> framesForOFA,*/ Mat prevFrame, Mat currFrame,  int i, int FRAME_HEIGHT, int FRAME_WIDTH)
 {
 	////start optical flow analysis////
 	////farneback dense optical flow analysis////
-
 	Mat gray;
 	Mat prevgray;
 	Mat flow;
@@ -66,7 +72,7 @@ int computeOpticalFlowAnalysis(/*vector <Mat> framesForOFA,*/ Mat prevFrame, Mat
 	cvtColor(currFrame, gray,COLOR_BGR2GRAY);
 	cvtColor(prevFrame, prevgray, COLOR_BGR2GRAY);
 
-	//imshow("GrayScale Image", gray);
+	imshow("GrayScale Image", gray);
 
 	calcOpticalFlowFarneback(prevgray, gray, flow, 0.5, 3, 15, 3, 5, 1.2, 0);
 
@@ -75,9 +81,9 @@ int computeOpticalFlowAnalysis(/*vector <Mat> framesForOFA,*/ Mat prevFrame, Mat
 	flow *= 1;
 
 	drawOptFlowMap(flow, cflow, 15, 1.5, Scalar(0, 255, 0));
-	//imshow("flow", cflow);
-
-	return (abs((sum(flow))[0]));
+	imshow("flow", cflow);
+	return (abs(sum(flow)[0])) / (FRAME_HEIGHT * FRAME_WIDTH) * 1000;
+	//return  abs((mean(flow).val[0] * 10000));
 }
 
 //method that returns date and time as a string to tag txt files
@@ -112,22 +118,17 @@ int computeSURF(vector <Mat> frames, int i)
 	//running SURF detector
 	SurfFeatureDetector detector(minHessian);
 
-	//vector <KeyPoint> vectKeyPoints1;
-	vector <KeyPoint> vectKeyPoints2;
+	vector <KeyPoint> vectKeyPoints;
 
-	//Mat matFrameKeyPoints1;
-	Mat matFrameKeyPoints2;
+	Mat matFrameKeyPoints;
 
-	//detector.detect( frames.get(i-1), vectKeyPoints1 );
-    detector.detect( frames.at(i), vectKeyPoints2 );
+    detector.detect( frames.at(i), vectKeyPoints );
 
-    //drawKeypoints( frames.get(i-1), vectKeyPoints1, matFrameKeyPoints1, Scalar::all(-1), DrawMatchesFlags::DEFAULT );
-    drawKeypoints( frames.at(i), vectKeyPoints2, matFrameKeyPoints2, Scalar::all(-1), DrawMatchesFlags::DEFAULT );
+    drawKeypoints( frames.at(i), vectKeyPoints, matFrameKeyPoints, Scalar::all(-1), DrawMatchesFlags::DEFAULT );
 
-    //imshow("Past Image 1", matFrameKeyPoints1 );
-    //imshow("SURF Detection", matFrameKeyPoints2 );
+    imshow("SURF Detection", matFrameKeyPoints );
 
-    return vectKeyPoints2.size();
+    return vectKeyPoints.size();
     ////end SURF extraction////
 }
 
@@ -241,13 +242,82 @@ int computeCanny(vector <Mat> frames, int i)
 
 	findContours(cannyFrame, contours, hierarchy, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
 
-	//imshow("Canny Edges", cannyFrame);
+	imshow("Canny Edges", cannyFrame);
     ////end Canny detector
 
     return contours.size();
 }
 
+long int computeFinalScore(Vector <int> vectNumberOfKeyPoints,Vector <int> numberOfHarrisCorners,
+	Vector <int> numberOfShiTomasiKeyPoints, Vector <int> numberOfContours, long int opticalFlowAnalysisFarnebackNumbers, int i)
+{
+	double ratioNumKeyPoints;
+	double ratioShiTomasi;
+	double ratioHarrisCorners;
+	double ratioContours;
 
+	if (abs(*max_element((vectNumberOfKeyPoints.begin()), (vectNumberOfKeyPoints.end()))/75) == 0)
+	{	ratioNumKeyPoints = 1;	}
+	else
+	{	ratioNumKeyPoints = abs(*max_element((vectNumberOfKeyPoints.begin()), (vectNumberOfKeyPoints.end())) / 75); }
+
+	if (abs(*max_element((numberOfShiTomasiKeyPoints.begin()), (numberOfShiTomasiKeyPoints.end()))/75) == 0)
+	{	ratioShiTomasi = 1;	}
+	else
+	{	ratioShiTomasi = abs(*max_element((numberOfShiTomasiKeyPoints.begin()), (numberOfShiTomasiKeyPoints.end())) / 75); }
+
+	if (abs(*max_element((numberOfHarrisCorners.begin()), (numberOfHarrisCorners.end())) / 75) == 0)
+	{	ratioHarrisCorners = 1;	}
+	else
+	{	ratioHarrisCorners = abs(*max_element((numberOfHarrisCorners.begin()), (numberOfHarrisCorners.end())) / 75); }
+
+	if (abs(*max_element((numberOfContours.begin()), (numberOfContours.end())) / 75) == 0)
+	{	ratioContours = 1;	}
+	else
+	{	ratioContours = abs(*max_element((numberOfContours.begin()), (numberOfContours.end())) / 75); }
+
+	double numberOfKeyPointsNormalized = abs(vectNumberOfKeyPoints[i] / ratioNumKeyPoints);
+	double numberOfHarrisCornersNormalized = abs(numberOfHarrisCorners[i] / ratioHarrisCorners);
+	double numberOfShiTomasiKeyPointsNormalized = abs(numberOfShiTomasiKeyPoints[i] / ratioShiTomasi);
+	double numberOfContoursNormalized = abs(numberOfContours[i] / ratioContours);
+
+	opticalFlowAnalysisFarnebackNumbers = abs(opticalFlowAnalysisFarnebackNumbers);
+
+	if(opticalFlowAnalysisFarnebackNumbers <= 250)
+	{
+		opticalFlowAnalysisFarnebackNumbers = 0;
+	}
+
+	else if(opticalFlowAnalysisFarnebackNumbers <= 500)
+	{
+		opticalFlowAnalysisFarnebackNumbers = 25;
+	}
+
+	else if(opticalFlowAnalysisFarnebackNumbers <= 2000)
+	{
+		opticalFlowAnalysisFarnebackNumbers = 75;
+	}
+
+	else
+	{
+		opticalFlowAnalysisFarnebackNumbers = 100;
+	}
+
+	long int finalScore = abs(((numberOfKeyPointsNormalized + numberOfShiTomasiKeyPointsNormalized +
+			numberOfHarrisCornersNormalized + numberOfContoursNormalized + opticalFlowAnalysisFarnebackNumbers) / 5)
+				);
+
+	if (abs(finalScore) >= 500)
+	{
+		cout << "Final Rating Over 500" << endl;
+		return -1;
+	}
+	return finalScore;
+
+	/*return ((vectNumberOfKeyPoints[i] / 4) + (numberOfHarrisCorners[i] / 1.87) +
+					(numberOfShiTomasiKeyPoints[i] /.8) + (numberOfContours[i] / 20) +
+					(opticalFlowAnalysisFarnebackNumbers[i-4] / 200000)) / 5;*/
+}
 
 String convertToString(int value)
 {
@@ -262,6 +332,7 @@ String convertToString(int value)
 
     //concatanating strings to presentable format
     return returnString;
+
 
 }
 
@@ -286,6 +357,8 @@ void frameHasData(Mat *frameToBeDisplayed, int error1)
 
 void destroyWindows()
 {
+
+
 	//close window
 	destroyWindow("Raw");
 	destroyWindow("SURF Detection");
@@ -295,7 +368,7 @@ void destroyWindows()
 }
 
 void saveToTxtFile(int FRAME_RATE, Vector <int> vectNumberOfKeyPoints, Vector <int>numberOfShiTomasiKeyPoints, Vector <int>
-numberOfContours, Vector <int> numberOfHarrisCorners, Vector <int> opticalFlowAnalysisFarnebackNumbers, const char* filename)
+numberOfContours, Vector <int> numberOfHarrisCorners, Vector <long double> opticalFlowAnalysisFarnebackNumbers, const char* filename)
 {
 	ofstream file;
 
@@ -337,99 +410,12 @@ void computeRunTime(clock_t t1, clock_t t2, int framesRead)
 
 	//display number of frames processed per second
 	cout << frameRateProcessing << " frames processed per second." << endl;
+
+	cout << framesRead << " frames read." << endl;
 }
 
-
-//main method
-int main() {
-
-	//creating initial and final clock objects
-	//taking current time when run starts
-	clock_t t1=clock();
-	clock_t t3;
-	clock_t t4;
-
-
-	String strRating;
-
-	//random number generator
-	RNG rng(12345);
-    
-	//setting constant filename to read form
-	const char* filename = "assets/P2-T1-V1-TCheck-Final.mp4";
-	//const char* filename = "assets/The Original Grumpy Cat!.mp4";
-
-	//defining VideoCapture object and filename to capture from
-	VideoCapture capture(filename);
-
-	//creating matrix to be displayed
-
-	//creating matricies for use in Harris & Shi Tomasi detections
-	//matrix of frame after shi tomasi
-	Mat shiTomasiFrame;
-
-
-	//frame to store part of optical analysis
-	Mat channelFrame;
-	
-	//initializing variable controlling printing on frame change
-	int prevFramesRead = 0;
-
-	int prevFramesReadCounter = 0;
-
-	int frameRateProcessing;
-
-	//string containing number of SURF key points
-	string numberOfKeyPointsSURF;     
-
-	//string containing number of Harris corners
-    string strNumberOfHarrisCorners;
-
-	//string containing number of ShiTomasi corners
-    string strNumberOfShiTomasiCorners;
-
-    //string to print out time difference
-    string strActiveTimeDifference;
-
-    //initializing string to display
-	string strDisplay =  "";
-
-	string strCanny;
-
-	string strNumberOpticalFlowAnalysis = "";
-
-	//creating a vector of matricies of all frames
-	vector <Mat> frames;
-
-	//creating a vector of matricies of all grayscaleframes
-	vector <Mat> grayFrames;
-
-	//initializing vector of channel edited frames
-	vector <Mat> vectChannelFrame;
-
-	vector <Mat> untouchedFrames;
-
-	vector <Mat*> cleanFrames;
-
-	vector <int> numberOfContours;
-	//creating a vector of key points for Shi Tomasi 
-	vector <int> numberOfShiTomasiKeyPoints;
-	vector <int> numberOfHarrisCorners;
-	vector <int> opticalFlowAnalysisFarnebackNumbers;
-
-	//creating counter to determine when video is finished playing;
-	int i = 0;
-
-	//counter for number of times encountering Error 1;
-	int error1 = 0;
-
-	//collecting statistics about the video
-	//constants that will not change
-	const int NUMBER_OF_FRAMES =(int) capture.get(CV_CAP_PROP_FRAME_COUNT);
-	const int FRAME_RATE = (int) capture.get(CV_CAP_PROP_FPS);
-	const int FRAME_WIDTH = capture.get(CV_CAP_PROP_FRAME_WIDTH);
-	const int FRAME_HEIGHT = capture.get(CV_CAP_PROP_FRAME_HEIGHT);
-
+void writeInitialStats(int NUMBER_OF_FRAMES, int FRAME_RATE, int FRAME_WIDTH, int FRAME_HEIGHT, const char* filename)
+{
 	////writing stats to txt file
 	//initiating write stream
 	ofstream writeToFile;
@@ -443,10 +429,6 @@ int main() {
 	//open file stream and begin writing file
 	writeToFile.open (strFilename);
 
-	vector <int> vectNumberOfKeyPoints;
-
-	vector <Mat*> framesForOFA;
-
 	//write video statistics
 	writeToFile << "Stats on video >> There are = " << NUMBER_OF_FRAMES << " frames. The frame rate is " << FRAME_RATE
 	<< " frames per second. Resolution is " << FRAME_WIDTH << " X " << FRAME_HEIGHT;
@@ -458,13 +440,66 @@ int main() {
 	cout << "Stats on video >> There are = " << NUMBER_OF_FRAMES << " frames. The frame rate is " << FRAME_RATE
 	<< " frames per second. Resolution is " << FRAME_WIDTH << " X " << FRAME_HEIGHT << endl;;
 
+}
+
+//main method
+int main() {
+
+	//creating initial and final clock objects
+	//taking current time when run starts
+	clock_t t1=clock();
+	clock_t t3, t4;
+
+	//random number generator
+	RNG rng(12345);
+    
+	//setting constant filename to read form
+	const char* filename = "assets/P2-T1-V1-TCheck-Final.mp4";
+	//const char* filename = "assets/The Original Grumpy Cat!.mp4";
+	//const char* filename = "assets/P8_T5_V1.mp4";
+	//defining VideoCapture object and filename to capture from
+
+	VideoCapture capture(filename);
+
+	//matrix of frame for shi Tomasi
+	Mat shiTomasiFrame;
+
+	Mat placeHolder = Mat::eye(1, 2, CV_64F);
+
+	//declaring strings for all metrics
+    string strRating, strNumberOfHarrisCorners, strNumberOfShiTomasiCorners, numberOfKeyPointsSURF, strCanny, strActiveTimeDifference;
+
+    //initializing string to display blank
+	string strDisplay =  "";
+	string strNumberOpticalFlowAnalysis = "";
+
+	//creating a vector of matricies of all frames
+	vector <Mat> frames;
+	//creating a vector of matricies of all grayscaleframes
+	vector <Mat> grayFrames;
+
+	//creating vector of pointers for OFA to avoid memory leaks
+	vector <Mat*> framesForOFA;
+
+	//creating vectors to store all metrics
+	vector <int> numberOfContours;
+	vector <int> numberOfShiTomasiKeyPoints;
+	vector <int> numberOfHarrisCorners;
+	vector <long double> opticalFlowAnalysisFarnebackNumbers;
+	vector <int> vectNumberOfKeyPoints;
+
+	//collecting statistics about the video
+	//constants that will not change
+	const int NUMBER_OF_FRAMES =(int) capture.get(CV_CAP_PROP_FRAME_COUNT);
+	const int FRAME_RATE = (int) capture.get(CV_CAP_PROP_FPS);
+	const int FRAME_WIDTH = capture.get(CV_CAP_PROP_FRAME_WIDTH);
+	const int FRAME_HEIGHT = capture.get(CV_CAP_PROP_FRAME_HEIGHT);
+
+	writeInitialStats(NUMBER_OF_FRAMES, FRAME_RATE, FRAME_WIDTH, FRAME_HEIGHT, filename);
+
 	// declaring and initially setting variables that will be actively updated during runtime
 	int framesRead = (int) capture.get(CV_CAP_PROP_POS_FRAMES);
 	double framesTimeLeft = (capture.get(CV_CAP_PROP_POS_MSEC)) / 1000;
-	double positionInVideo = capture.get(CV_CAP_PROP_POS_AVI_RATIO);
-	double percentageThroughVideo = positionInVideo * 100;
-
-	int q = 0;
 
 	//display welcome image
 	imshow("Welcome", imread("assets/Aptima.jpg"));
@@ -475,72 +510,61 @@ int main() {
    	//close welcome image
    	destroyWindow("Welcome");
 
+   	//initializing counters
    	int generalDebugCounter = 0;
+	int q = 0;
+	int i = 0;
+	int error1 = 0;
+	int prevFramesRead = 0;
+	int prevFramesReadCounter = 0;
 
 	//actual run time, while video is not finished
 	while(framesRead < NUMBER_OF_FRAMES)
 	{
-
+		//create pointer to new object
 		Mat * frameToBeDisplayed = new Mat();
 
 		//reading in current frame
 		capture.read(*frameToBeDisplayed);
-		cleanFrames.push_back(frameToBeDisplayed);
 
-		//this_thread::sleep_for (std::chrono::seconds(1));
-
+		//check if frame has data
 		frameHasData(frameToBeDisplayed, error1);
 		
-		//imshow("Raw Frame", *cleanFrames.at(i));
-
 		//adding current frame to vector/array list of matricies
 		frames.push_back(*frameToBeDisplayed);
-
-		untouchedFrames.push_back(*frameToBeDisplayed);
-
-		cvtColor(untouchedFrames.at(i), channelFrame, CV_BGR2GRAY);
 
 		//convert Shi Tomasi frame to grayscale
 		cvtColor(frames.at(i), shiTomasiFrame, CV_BGR2GRAY);
 
-		channelFrame = shiTomasiFrame;
-
-		//save channel frame
-		vectChannelFrame.push_back(channelFrame);
-
 		grayFrames.push_back(shiTomasiFrame);
 
-		vectNumberOfKeyPoints.push_back(computeSURF(frames, i));
+		//imshow("Raw Frame", frames.at(i));
 
+		//compute SURF
+		vectNumberOfKeyPoints.push_back(computeSURF(frames, i));
 		String numberOfKeyPointsSURF = convertToString(vectNumberOfKeyPoints.at(i));
 
+		//compute Harris
 		numberOfHarrisCorners.push_back(computeHarris(grayFrames, frames, i));
-
 		String strNumberOfHarrisCorners = convertToString(numberOfHarrisCorners.at(i));
 
+		//compute ShiTomasi
 		numberOfShiTomasiKeyPoints.push_back(computeShiTomasi(grayFrames, i));
-
 		String strNumberOfShiTomasiCorners = convertToString(numberOfShiTomasiKeyPoints.at(i));
 
+		//compute Canny
 		numberOfContours.push_back(computeCanny(frames, i));
-		
 		strCanny = convertToString(numberOfContours.at(i));
 
-		if(i > 3)
+		//if ready for OFA
+		if(i > 10)
 		{
-		opticalFlowAnalysisFarnebackNumbers.push_back(computeOpticalFlowAnalysis(/*cleanFrames*/ *framesForOFA.at(q-1), *framesForOFA.at(q-2), i));
-
-		strNumberOpticalFlowAnalysis = convertToString(computeOpticalFlowAnalysis(/*cleanFrames*/ *framesForOFA.at(q-1),  *framesForOFA.at(q-2), i));//(opticalFlowAnalysisFarnebackNumbers.at(i)));
-		//strNumberOpticalFlowAnalysis = "hello";
-
-		int finalScore = ((vectNumberOfKeyPoints.at(i) / 4) + (numberOfHarrisCorners.at(i) / 1.87) +
-				(numberOfShiTomasiKeyPoints.at(i) /.8) + (numberOfContours.at(i) / 20) +
-				(opticalFlowAnalysisFarnebackNumbers.at(i-4) / 200000)) / 5;
-
-		strRating = to_string(finalScore);
-
+			//compute FDOFA
+			opticalFlowAnalysisFarnebackNumbers.push_back(computeOpticalFlowAnalysis(*framesForOFA.at(q-1), *framesForOFA.at(q-2), i, FRAME_HEIGHT, FRAME_WIDTH));
+			strNumberOpticalFlowAnalysis = convertToString(computeOpticalFlowAnalysis(*framesForOFA.at(q-1),  *framesForOFA.at(q-2), i, FRAME_HEIGHT, FRAME_WIDTH));
+			strRating = to_string(computeFinalScore(vectNumberOfKeyPoints, numberOfHarrisCorners, numberOfShiTomasiKeyPoints, numberOfContours,
+					computeOpticalFlowAnalysis(*framesForOFA.at(q-1),  *framesForOFA.at(q-2), i, FRAME_HEIGHT, FRAME_WIDTH), i));
 		}
-
 		//if not enough data has been generated for optical flow
 		else if(i > 0 && i <= 3)
 		{
@@ -550,7 +574,7 @@ int main() {
 			+ strNumberOfHarrisCorners + " Canny: " + strCanny + " Frame Number: " + to_string(framesRead) +  " SFP: " + strActiveTimeDifference;
 
 			//creating black empty image
-			Mat pic = Mat::zeros(45,2100,CV_8UC3);
+			Mat pic = Mat::zeros(45,2250,CV_8UC3);
 
 			//adding text to image
 			putText(pic, strDisplay, cvPoint(30,30),CV_FONT_HERSHEY_SIMPLEX, 1.25, cvScalar(0,255,0), 1, CV_AA, false);
@@ -559,20 +583,10 @@ int main() {
 			imshow("Stats", pic);
 
 		}
-		//normal runtime
 
 		//gather real time statistics
-		//number of frames read so far
 		framesRead = (int) capture.get(CV_CAP_PROP_POS_FRAMES);
-
-		//currenttime in video
 		framesTimeLeft = (capture.get(CV_CAP_PROP_POS_MSEC)) / 1000;
-		//position in video from 0 - 1
-		positionInVideo = capture.get(CV_CAP_PROP_POS_AVI_RATIO);
-
-		//percentage through video
-
-		percentageThroughVideo = positionInVideo * 100;
 
 		//creating text to display
 		strDisplay = "SURF Features: " + numberOfKeyPointsSURF + " Shi-Tomasi: " + strNumberOfShiTomasiCorners + " Harris: "
@@ -625,8 +639,6 @@ int main() {
 		{	
 			prevFramesRead = framesRead;
 
-			q++;
-
 			framesForOFA.push_back(frameToBeDisplayed);
 
 			if(prevFramesReadCounter % 2 != 0)
@@ -641,7 +653,6 @@ int main() {
 				activeTimeDifference *= 1000;
 
 			}
-
 			else
 			{
 
@@ -657,19 +668,27 @@ int main() {
 
 			//increment ready that next frame has been read
 			prevFramesReadCounter++;
-
 		}
-
+		q++;
    		i++;
+
+   		if(i > 5)
+   		{
+   			frames.at(i - 5) = placeHolder;
+   			grayFrames.at(i - 5) = placeHolder;
+   			delete framesForOFA.at(i - 5);
+   		}
 
 	}		
 
-	for(int z = 0; z < cleanFrames.size(); z++)
+	for(int z = 0; z < framesForOFA.size(); z++)
 	{
-		delete cleanFrames.at(z);
+		delete framesForOFA.at(z);
 	}
 
-	cleanFrames.clear();
+	frames.clear();
+	grayFrames.clear();
+	framesForOFA.clear();
 
 	//print out debug and error information
 	cout << "Debug Information >> i = " << i << "; Error 1 encountered " << error1 << "times. " << endl;
