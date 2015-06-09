@@ -1,10 +1,9 @@
 //=======================================================================================
 // Name        : Evalu8.cpp
 // Author      : Vidur Prasad
-// Version     : 1.0.1
+// Version     : 1.3.0
 // Copyright   : APTIMA Inc.
 // Description : Evaluate drone footage to asses visual clutter based load
-// Error Messages : 1 --> Image cannot be read or is empty
 //========================================================================================
 
 //========================================================================================
@@ -38,7 +37,10 @@
 #include <math.h>
 #include <algorithm>
 #include <vector>
+#include <pthread.h>
+#include <cstdlib>
 
+//declaring templates for use in max element function
 template <typename T, size_t N> const T* mybegin(const T (&a)[N]) { return a; }
 template <typename T, size_t N> const T* myend  (const T (&a)[N]) { return a+N; }
 
@@ -46,123 +48,113 @@ template <typename T, size_t N> const T* myend  (const T (&a)[N]) { return a+N; 
 using namespace cv;
 using namespace std;
 
-static void drawOptFlowMap(const Mat& flow, Mat& cflowmap, int step,
-                    double, const Scalar& color)
-{
-	flow *= 1.5;
-    for(int y = 0; y < cflowmap.rows; y += step)
-        for(int x = 0; x < cflowmap.cols; x += step)
-        {
-            const Point2f& fxy = flow.at<Point2f>(y, x);
-            line(cflowmap, Point(x,y), Point(cvRound(x+fxy.x), cvRound(y+fxy.y)),
-                 color);
-            circle(cflowmap, Point(x,y), 2, color, -1);
-        }
-}
+//multithreading global variables
+static vector <Mat> globalFrames;
+static vector <Mat> globalGrayFrames;
+int FRAME_HEIGHT;
+int FRAME_WIDTH;
+//setting constant filename to read form
+const char* filename = "assets/P2-T1-V1-TCheck-Final.mp4";
+//const char* filename = "assets/The Original Grumpy Cat!.mp4";
+//const char* filename = "assets/P8_T5_V1.mp4";
 
-long double computeOpticalFlowAnalysis(/*vector <Mat> framesForOFA,*/ Mat prevFrame, Mat currFrame,  int i, int FRAME_HEIGHT, int FRAME_WIDTH)
-{
-	////start optical flow analysis////
-	////farneback dense optical flow analysis////
-	Mat gray;
-	Mat prevgray;
-	Mat flow;
-	Mat cflow;
+//SURF Global Variables
+static Mat surfFrame;
+int surfThreadCompletion = 0;
+int numberOfSURFFeatures = 0;
 
-	cvtColor(currFrame, gray,COLOR_BGR2GRAY);
-	cvtColor(prevFrame, prevgray, COLOR_BGR2GRAY);
+//canny Global Variables
+int numberOfContoursThread = 0;
+int cannyThreadCompletion = 0;
 
-	imshow("GrayScale Image", gray);
+//Shi Tomasi Global Variables
+int shiTomasiFeatures = 0;
+int shiTomasiThreadCompletion = 0;
 
-	calcOpticalFlowFarneback(prevgray, gray, flow, 0.5, 3, 15, 3, 5, 1.2, 0);
+//harris global variables
+int numberOfHarrisCornersCounter = 0;
+int harrisCornersThreadCompletion = 0;
 
-	cvtColor(prevgray, cflow, COLOR_GRAY2BGR);
+//optical flow global variables
+int sumOpticalFlow = 0;
+int opticalFlowThreadCompletion = 0;
 
-	flow *= 1;
-
-	drawOptFlowMap(flow, cflow, 15, 1.5, Scalar(0, 255, 0));
-	imshow("flow", cflow);
-	return (abs(sum(flow)[0])) / (FRAME_HEIGHT * FRAME_WIDTH) * 1000;
-	//return  abs((mean(flow).val[0] * 10000));
-}
+struct thread_data{
+   int i;
+};
 
 //method that returns date and time as a string to tag txt files
-const string currentDateTime() 
-{	
+const string currentDateTime()
+{
 	//creating time object that reads current time
     time_t now = time(0);
-
-    //creating time strucutre
+    //creating time structure
     struct tm tstruct;
-
     //creating a character buffer of 80 characters
     char buf[80];
-
-    //checking urrent local time
+    //checking current local time
     tstruct = *localtime(&now);
-
     //writing time to string
     strftime(buf, sizeof(buf), "%Y-%m-%d.%X", &tstruct);
-
     //returning the string with the time
     return buf;
 }
 
-int computeSURF(vector <Mat> frames, int i)
+//method to perform optical flow analysis
+void *computeOpticalFlowAnalysisThread(void *threadarg)
 {
-	////start SURF extraction////
+	struct thread_data *data;
+	data = (struct thread_data *) threadarg;
+	int i = data->i;
 
-	//setting constant integerr minimum Hessian for SURF Recommended between 400-800
-	const int minHessian = 500;
+	Mat prevFrame, currFrame;
+	Mat gray, prevGray, flow,cflow;
 
-	//running SURF detector
-	SurfFeatureDetector detector(minHessian);
+	prevFrame = globalFrames.at(i-1);
+	currFrame = globalFrames.at(i);
 
-	vector <KeyPoint> vectKeyPoints;
+	//converting to grayscale
+	cvtColor(currFrame, gray,COLOR_BGR2GRAY);
+	cvtColor(prevFrame, prevGray, COLOR_BGR2GRAY);
 
-	Mat matFrameKeyPoints;
+	//calculating optical flow
+	calcOpticalFlowFarneback(prevGray, gray, flow, 0.5, 3, 15, 3, 5, 1.2, 0);
 
-    detector.detect( frames.at(i), vectKeyPoints );
+	flow *= 1.5;
+	//returning per pixel average movemet,iwth amplitude increase
+	sumOpticalFlow = (abs(sum(flow)[0]));
+	//sumOpticalFlow = ceil((abs(sum(flow)[0])) / (FRAME_HEIGHT * FRAME_WIDTH) * 1000);
 
-    drawKeypoints( frames.at(i), vectKeyPoints, matFrameKeyPoints, Scalar::all(-1), DrawMatchesFlags::DEFAULT );
-
-    imshow("SURF Detection", matFrameKeyPoints );
-
-    return vectKeyPoints.size();
-    ////end SURF extraction////
+	opticalFlowThreadCompletion = 1;
 }
 
-int computeHarris(vector <Mat> grayFrames, vector <Mat> frames, int i)
+//calculate number of Harris corners
+void *computeHarrisThread(void *threadarg)
 {
-	////start Harris feature extraction
+	struct thread_data *data;
+	data = (struct thread_data *) threadarg;
+	int i = data->i;
 
-	int numberOfHarrisCornersCounter = 0;
-
+	numberOfHarrisCornersCounter = 0;
 	int blockSize = 3;
-
-	//setting aperture size to constant of three
 	const int apertureSize = 3;
-
-	//initializing variables for Harris & Shi Tomasi min & max values
 	double harrisMinValue;
 	double harrisMaxValue;
 	double harrisQualityLevel = 35;
 	double maxQualityLevel = 100;
 
-    //read in frame formatted for use in Harris
-    Mat harrisDST = Mat::zeros(grayFrames.at(i).size(), CV_32FC(6) );
-
-    //read in frame formatted for use in Harris
-    Mat mc = Mat::zeros( grayFrames.at(i).size(), CV_32FC1 );
+    //create frame formatted for use in Harris
+    Mat harrisDST = Mat::zeros(globalGrayFrames.at(i).size(), CV_32FC(6) );
+    Mat mc = Mat::zeros( globalGrayFrames.at(i).size(), CV_32FC1 );
+    Mat harrisCornerFrame = globalFrames.at(i);
 
     //run Corner Eigen Vals and Vecs to find corners
-    cornerEigenValsAndVecs( grayFrames.at(i), harrisDST, blockSize, apertureSize, BORDER_DEFAULT );
+    cornerEigenValsAndVecs( globalGrayFrames.at(i), harrisDST, blockSize, apertureSize, BORDER_DEFAULT );
 
     //use Eigen values to step through each pixel individaully and finish applying equation
-    for( int j = 0; j < grayFrames.at(i).rows; j++ )
+    for( int j = 0; j < globalGrayFrames.at(i).rows; j++ )
     {
-    	//for each column
-    	for( int h = 0; h < grayFrames.at(i).cols; h++ )
+    	for( int h = 0; h < globalGrayFrames.at(i).cols; h++ )
     	{
     		//apply algorithm
 			float lambda_1 = harrisDST.at<Vec6f>(j, h)[0];
@@ -171,17 +163,13 @@ int computeHarris(vector <Mat> grayFrames, vector <Mat> frames, int i)
     	}
     }
 
-    //find locations of minimums and maximums 
+    //find locations of minimums and maximums
     minMaxLoc( mc, &harrisMinValue, &harrisMaxValue, 0, 0, Mat() );
 
-    //save frame in temporary matrix 
-    Mat harrisCornerFrame = frames.at(i);
-
     //apply harris properly to every pixel
-    for( int j = 0; j < grayFrames.at(i).rows; j++ )
+    for( int j = 0; j < globalGrayFrames.at(i).rows; j++ )
     {
-    	//for each column
-    	for( int h = 0; h < grayFrames.at(i).cols; h++ )
+    	for( int h = 0; h < globalGrayFrames.at(i).cols; h++ )
 	    {
 			if( mc.at<float>(j,h) > harrisMinValue + ( harrisMaxValue - harrisMinValue )* harrisQualityLevel/maxQualityLevel)
 			{
@@ -189,176 +177,193 @@ int computeHarris(vector <Mat> grayFrames, vector <Mat> frames, int i)
 				numberOfHarrisCornersCounter++;
 			}
 		}
-
+	}
+    //if harris glitch occurs
+	if(numberOfHarrisCornersCounter > 10000)
+	{
+		numberOfHarrisCornersCounter = 2000;
 	}
 
-	return numberOfHarrisCornersCounter;
+	harrisCornersThreadCompletion = 1;
 }
 
-int computeShiTomasi(vector <Mat> grayFrames, int i)
-{	
-	//corners 
+//calculate number of Shi-Tomasi corners
+void *computeShiTomasiThread(void *threadarg)
+{
+	struct thread_data *data;
+    data = (struct thread_data *) threadarg;
+    int i = data->i;
 	vector<Point2f> cornersf;
-
-	//setting quality level
 	const double qualityLevel = 0.1;
-
-	//setting minium distance between points
 	const double minDistance = 10;
-
-	//setting block size to search for
 	const int blockSize = 3;
-
-	//will use Harris detector seperately
-	const bool useHarrisDetector = false;
-
-	//setting k constant value
 	const double k = 0.04;
+
+	//harris detector is used seperately
+	const bool useHarrisDetector = false;
 
 	//setting max number of corners to largest possible value
 	const int maxCorners = numeric_limits<int>::max();
 
 	//perform Shi-Tomasi algorithm
-    goodFeaturesToTrack(grayFrames.at(i), cornersf, maxCorners, qualityLevel, minDistance, 
+    goodFeaturesToTrack(globalGrayFrames.at(i), cornersf, maxCorners, qualityLevel, minDistance,
     Mat(), blockSize, useHarrisDetector,k);
 
-    return cornersf.size();
+    //return number of Shi Tomasi corners
+    shiTomasiFeatures = cornersf.size();
 
-    ////end Shi-Tomasi feature extraction
+    shiTomasiThreadCompletion = 1;
 }
 
-int computeCanny(vector <Mat> frames, int i)
-{	
-	vector<Vec4i> hierarchy;
 
-	typedef vector<vector<Point> > TContours;
-
-	TContours contours;
-
-	Mat cannyFrame; 
-
-	 ////start Canny detector
-	Canny(frames.at(i), cannyFrame, 115, 115);
-
-	findContours(cannyFrame, contours, hierarchy, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
-
-	imshow("Canny Edges", cannyFrame);
-    ////end Canny detector
-
-    return contours.size();
-}
-
-long int computeFinalScore(Vector <int> vectNumberOfKeyPoints,Vector <int> numberOfHarrisCorners,
-	Vector <int> numberOfShiTomasiKeyPoints, Vector <int> numberOfContours, long int opticalFlowAnalysisFarnebackNumbers, int i)
+void *computeSURFThread(void *threadarg)
 {
-	double ratioNumKeyPoints;
-	double ratioShiTomasi;
-	double ratioHarrisCorners;
-	double ratioContours;
+   struct thread_data *data;
+   data = (struct thread_data *) threadarg;
+   int i = data->i;
+   globalFrames.at(i).copyTo(surfFrame);
+   //setting constant integer minimum Hessian for SURF Recommended between 400-800
+   const int minHessian = 500;
+   vector <KeyPoint> vectKeyPoints;
+   //running SURF detector
+   SurfFeatureDetector detector(minHessian);
+   detector.detect(surfFrame, vectKeyPoints );
+   //drawing keypoints
+   drawKeypoints(surfFrame, vectKeyPoints, surfFrame, Scalar::all(-1), DrawMatchesFlags::DEFAULT );
+   numberOfSURFFeatures = vectKeyPoints.size();
+   surfThreadCompletion = 1;
+   pthread_exit(NULL);
+}
 
-	if (abs(*max_element((vectNumberOfKeyPoints.begin()), (vectNumberOfKeyPoints.end()))/75) == 0)
-	{	ratioNumKeyPoints = 1;	}
-	else
-	{	ratioNumKeyPoints = abs(*max_element((vectNumberOfKeyPoints.begin()), (vectNumberOfKeyPoints.end())) / 75); }
+//calculate number of contours
+void *computeCannyThread(void *threadarg)
+{
+	Mat cannyFrame;
+	vector<Vec4i> hierarchy;
+	typedef vector<vector<Point> > TContours;
+	TContours contours;
+	struct thread_data *data;
+	data = (struct thread_data *) threadarg;
+	int i = data->i;
+	//run canny edge detector
+	Canny(globalFrames.at(i), cannyFrame, 115, 115);
+	findContours(cannyFrame, contours, hierarchy, CV_RETR_CCOMP, CV_CHAIN_APPROX_NONE);
+	//return number of contours detected
+	//imshow("globalFrames", contours);
 
-	if (abs(*max_element((numberOfShiTomasiKeyPoints.begin()), (numberOfShiTomasiKeyPoints.end()))/75) == 0)
-	{	ratioShiTomasi = 1;	}
-	else
-	{	ratioShiTomasi = abs(*max_element((numberOfShiTomasiKeyPoints.begin()), (numberOfShiTomasiKeyPoints.end())) / 75); }
+    numberOfContoursThread = contours.size();
 
-	if (abs(*max_element((numberOfHarrisCorners.begin()), (numberOfHarrisCorners.end())) / 75) == 0)
-	{	ratioHarrisCorners = 1;	}
-	else
-	{	ratioHarrisCorners = abs(*max_element((numberOfHarrisCorners.begin()), (numberOfHarrisCorners.end())) / 75); }
+    cannyThreadCompletion = 1;
+}
 
-	if (abs(*max_element((numberOfContours.begin()), (numberOfContours.end())) / 75) == 0)
-	{	ratioContours = 1;	}
-	else
-	{	ratioContours = abs(*max_element((numberOfContours.begin()), (numberOfContours.end())) / 75); }
+//method to normalize normal values
+double normalizeValues(double value, double meanValue)
+{
+	//deterine normalization factor to 50
+	meanValue =  50 / meanValue;
 
-	double numberOfKeyPointsNormalized = abs(vectNumberOfKeyPoints[i] / ratioNumKeyPoints);
-	double numberOfHarrisCornersNormalized = abs(numberOfHarrisCorners[i] / ratioHarrisCorners);
-	double numberOfShiTomasiKeyPointsNormalized = abs(numberOfShiTomasiKeyPoints[i] / ratioShiTomasi);
-	double numberOfContoursNormalized = abs(numberOfContours[i] / ratioContours);
+	//apply normalization ration
+	value *= meanValue;
 
-	opticalFlowAnalysisFarnebackNumbers = abs(opticalFlowAnalysisFarnebackNumbers);
+	//give extra weight to differential from 50 & add 50 to ensure positive number
+	value = abs(((value - 50) * 1.25)) + 50;
 
-	if(opticalFlowAnalysisFarnebackNumbers <= 250)
+	return value;
+}
+
+//method to normalize OFA values
+double normalizeOFAValues(double value, double meanValue)
+{
+	//deterine normalization factor to 50
+	meanValue =  50 / meanValue;
+
+	//apply normalization ration
+	value *= meanValue;
+
+	//give extra weight to differential from 50 & add 50 to ensure positive number
+
+	value = abs(((value - 50) * 1.25)) + 50;
+
+	//if extreme motion
+	if(value > 10000)
 	{
-		opticalFlowAnalysisFarnebackNumbers = 0;
+		//take natural log, after log base 10, and then multiply by 20;
+		return (log(log10(value)) * 20);
 	}
 
-	else if(opticalFlowAnalysisFarnebackNumbers <= 500)
-	{
-		opticalFlowAnalysisFarnebackNumbers = 25;
-	}
-
-	else if(opticalFlowAnalysisFarnebackNumbers <= 2000)
-	{
-		opticalFlowAnalysisFarnebackNumbers = 75;
-	}
-
 	else
 	{
-		opticalFlowAnalysisFarnebackNumbers = 100;
+		return value;
 	}
 
+}
+
+//calculate log of a vector and normalize
+double calcLogVector(double value)
+{
+	return log10(value) + 500;
+}
+
+//calculate mean of vector of ints
+double calculateMeanVector(Vector <int> scores)
+{
+  double total;
+  //sum all elements of vector
+  for(int i = 0; i < scores.size(); i++)
+  { total += abs(scores[i]); }
+  //divide by number of elements
+  return total / scores.size();
+}
+
+//calculate mean of vector of ints
+double calculateMeanVector(vector <int> scores)
+{
+  double total;
+  //sum all elements of vector
+  for(int i = 0; i < scores.size(); i++)
+  { total += abs(scores.at(i)); }
+  //divide by number of elements
+  return total / scores.size();
+}
+
+
+//calculate mean of vector of oubles
+double calculateMeanVector(Vector<double> scores)
+{
+  double total;
+  //sum all elements of vector
+  for(int i = 0; i < scores.size(); i++)
+  { total += abs(scores[i]); }
+  //divide by number of elements
+  return total / scores.size();
+}
+
+//method to compute final score
+int computeFinalScore(Vector <int> vectNumberOfKeyPoints,Vector <int> numberOfHarrisCorners,
+	Vector <int> numberOfShiTomasiKeyPoints, Vector <int> numberOfContours, Vector <double> opticalFlowAnalysisFarnebackNumbers, int i)
+{
+	//normalize values using mean
+	double numberOfKeyPointsNormalized = 3 * normalizeValues(vectNumberOfKeyPoints[i], calculateMeanVector(vectNumberOfKeyPoints));
+	double numberOfHarrisCornersNormalized = 3 * normalizeValues(numberOfHarrisCorners[i], calculateMeanVector(numberOfHarrisCorners));
+	double numberOfShiTomasiKeyPointsNormalized = 3 * normalizeValues(numberOfShiTomasiKeyPoints[i], calculateMeanVector(numberOfShiTomasiKeyPoints));
+	double numberOfContoursNormalized = normalizeValues(numberOfContours[i], calculateMeanVector(numberOfContours));
+	double opticalFlowAnalysisFarnebackNumbersNormalized = 10 * normalizeOFAValues(opticalFlowAnalysisFarnebackNumbers[i], calculateMeanVector(opticalFlowAnalysisFarnebackNumbers));
+
+	//determine final score by averaging
 	long int finalScore = abs(((numberOfKeyPointsNormalized + numberOfShiTomasiKeyPointsNormalized +
-			numberOfHarrisCornersNormalized + numberOfContoursNormalized + opticalFlowAnalysisFarnebackNumbers) / 5)
+			numberOfHarrisCornersNormalized + numberOfContoursNormalized + opticalFlowAnalysisFarnebackNumbersNormalized) / 20)
 				);
 
-	if (abs(finalScore) >= 500)
+	//if value is not possible, report error
+	if (abs(finalScore) > 100 || finalScore < 0)
 	{
-		cout << "Final Rating Over 500" << endl;
-		return -1;
+		finalScore = -101;
 	}
 	return finalScore;
-
-	/*return ((vectNumberOfKeyPoints[i] / 4) + (numberOfHarrisCorners[i] / 1.87) +
-					(numberOfShiTomasiKeyPoints[i] /.8) + (numberOfContours[i] / 20) +
-					(opticalFlowAnalysisFarnebackNumbers[i-4] / 200000)) / 5;*/
-}
-
-String convertToString(int value)
-{
-	//initiating conversion string stream
-	ostringstream convert;
-
-	//counting number of corners and sending to converter stream
-	convert << value;
-
-	//reading number of corners into string from converter
-	string returnString = convert.str();
-
-    //concatanating strings to presentable format
-    return returnString;
-
-
-}
-
-void frameHasData(Mat *frameToBeDisplayed, int error1)
-{
-	//if the frame is empty
-	if (frameToBeDisplayed->empty())
-	{
-		//Error Message 1, Image is empty
-		cout << "Error: 1 --> Image is empty, cannot be loaded" << endl;
-
-		//throw an error
-		throw "Error: 1 --> Image is empty, cannot be loaded";
-
-		//add that error did occur
-		error1++;
-
-		exit(-1);
-	}
-
 }
 
 void destroyWindows()
 {
-
-
 	//close window
 	destroyWindow("Raw");
 	destroyWindow("SURF Detection");
@@ -367,8 +372,8 @@ void destroyWindows()
 	destroyWindow("Farneback Dense Optical Flow Analysis");
 }
 
-void saveToTxtFile(int FRAME_RATE, Vector <int> vectNumberOfKeyPoints, Vector <int>numberOfShiTomasiKeyPoints, Vector <int>
-numberOfContours, Vector <int> numberOfHarrisCorners, Vector <long double> opticalFlowAnalysisFarnebackNumbers, const char* filename)
+void saveToTxtFile(int FRAME_RATE, Vector <int> vectNumberOfKeyPoints, Vector <int> numberOfShiTomasiKeyPoints, Vector <int>
+numberOfContours, Vector <int> numberOfHarrisCorners, Vector <double> opticalFlowAnalysisFarnebackNumbers, const char* filename)
 {
 	ofstream file;
 
@@ -395,8 +400,51 @@ numberOfContours, Vector <int> numberOfHarrisCorners, Vector <long double> optic
 
 	//close file stream
 	file.close();
+
+	ofstream fileStreamTwo;
+	//creating filename ending
+	string vectFilenameAppendTwo = " meanData.ev8";
+		//concanating and creating file name string
+	string strVectFilenameTwo = filename + currentDateTime() + vectFilenameAppendTwo;
+	file.open (strVectFilename);
+	//save txt file
+	for(int v = 0; v < vectNumberOfKeyPoints.size() - 5; v++)
+	{
+		file << calculateMeanVector(vectNumberOfKeyPoints) << ";" << endl;
+		file << calculateMeanVector(numberOfShiTomasiKeyPoints) << ";" << endl;
+		file << calculateMeanVector(numberOfContours) << ";" << endl;
+		file << calculateMeanVector(numberOfHarrisCorners) << ";" << endl;
+		file << calculateMeanVector(opticalFlowAnalysisFarnebackNumbers) << ";" << endl;
+
+	}
+
+	//close file stream
+	fileStreamTwo.close();
 }
 
+void saveToTxtFile(vector <int> finalRatings)
+{
+	ofstream file;
+
+	//creating filename ending
+	string vectFilenameAppend = "finalRatings.txt";
+
+		//concanating and creating file name string
+	string strVectFilename = filename + currentDateTime() + vectFilenameAppend;
+
+	file.open (strVectFilename);
+
+	//save txt file
+	for(int v = 0; v < finalRatings.size() ; v++)
+	{
+		file << v << " " << finalRatings.at(v) << endl;
+	}
+
+	//close file stream
+	file.close();
+}
+
+//method to calculate tootal run time
 void computeRunTime(clock_t t1, clock_t t2, int framesRead)
 {
 	//subtract from start time
@@ -414,6 +462,13 @@ void computeRunTime(clock_t t1, clock_t t2, int framesRead)
 	cout << framesRead << " frames read." << endl;
 }
 
+//calculate time for each iteration
+double calculateFPS(clock_t tStart, clock_t tFinal)
+{
+	return 1/((((float)tFinal-(float)tStart) / CLOCKS_PER_SEC));
+}
+
+//write initial statistics about the video
 void writeInitialStats(int NUMBER_OF_FRAMES, int FRAME_RATE, int FRAME_WIDTH, int FRAME_HEIGHT, const char* filename)
 {
 	////writing stats to txt file
@@ -442,6 +497,25 @@ void writeInitialStats(int NUMBER_OF_FRAMES, int FRAME_RATE, int FRAME_WIDTH, in
 
 }
 
+void normalizeRatings(vector<int> finalScores)
+{
+	vector <int> normalizedFinalScores;
+	double meanOfVector = calculateMeanVector(finalScores);
+
+	//int maxElement = max_element(begin(finalScores), end(finalScores));
+	double maxElement = *max_element(finalScores.begin(), finalScores.end());
+	double minElement = *min_element(finalScores.begin(), finalScores.end());
+
+	for(int i = 0; i < finalScores.size(); i++)
+	{
+		normalizedFinalScores.push_back(((finalScores.at(i) - minElement) / (maxElement - minElement))*100);
+		cout << ((finalScores.at(i) - minElement) / (maxElement - minElement))*100 << endl;
+	}
+
+	saveToTxtFile(normalizedFinalScores);
+}
+
+
 //main method
 int main() {
 
@@ -453,10 +527,7 @@ int main() {
 	//random number generator
 	RNG rng(12345);
     
-	//setting constant filename to read form
-	const char* filename = "assets/P2-T1-V1-TCheck-Final.mp4";
-	//const char* filename = "assets/The Original Grumpy Cat!.mp4";
-	//const char* filename = "assets/P8_T5_V1.mp4";
+
 	//defining VideoCapture object and filename to capture from
 
 	VideoCapture capture(filename);
@@ -481,19 +552,23 @@ int main() {
 	//creating vector of pointers for OFA to avoid memory leaks
 	vector <Mat*> framesForOFA;
 
+	vector <double> logOpticalFlowAnalysisFarnebackNumbers;
+
 	//creating vectors to store all metrics
 	vector <int> numberOfContours;
 	vector <int> numberOfShiTomasiKeyPoints;
 	vector <int> numberOfHarrisCorners;
-	vector <long double> opticalFlowAnalysisFarnebackNumbers;
+	vector <double> opticalFlowAnalysisFarnebackNumbers;
 	vector <int> vectNumberOfKeyPoints;
+
+	vector <int> finalScores;
 
 	//collecting statistics about the video
 	//constants that will not change
 	const int NUMBER_OF_FRAMES =(int) capture.get(CV_CAP_PROP_FRAME_COUNT);
 	const int FRAME_RATE = (int) capture.get(CV_CAP_PROP_FPS);
-	const int FRAME_WIDTH = capture.get(CV_CAP_PROP_FRAME_WIDTH);
-	const int FRAME_HEIGHT = capture.get(CV_CAP_PROP_FRAME_HEIGHT);
+	FRAME_WIDTH = capture.get(CV_CAP_PROP_FRAME_WIDTH);
+	FRAME_HEIGHT = capture.get(CV_CAP_PROP_FRAME_HEIGHT);
 
 	writeInitialStats(NUMBER_OF_FRAMES, FRAME_RATE, FRAME_WIDTH, FRAME_HEIGHT, filename);
 
@@ -511,59 +586,135 @@ int main() {
    	destroyWindow("Welcome");
 
    	//initializing counters
-   	int generalDebugCounter = 0;
 	int q = 0;
 	int i = 0;
-	int error1 = 0;
 	int prevFramesRead = 0;
 	int prevFramesReadCounter = 0;
 
 	//actual run time, while video is not finished
 	while(framesRead < NUMBER_OF_FRAMES)
 	{
+		clock_t tStart = clock();
+
 		//create pointer to new object
 		Mat * frameToBeDisplayed = new Mat();
 
 		//reading in current frame
 		capture.read(*frameToBeDisplayed);
-
-		//check if frame has data
-		frameHasData(frameToBeDisplayed, error1);
 		
 		//adding current frame to vector/array list of matricies
 		frames.push_back(*frameToBeDisplayed);
+
+		globalFrames.push_back(*frameToBeDisplayed);
 
 		//convert Shi Tomasi frame to grayscale
 		cvtColor(frames.at(i), shiTomasiFrame, CV_BGR2GRAY);
 
 		grayFrames.push_back(shiTomasiFrame);
+		globalGrayFrames.push_back(shiTomasiFrame);
 
-		//imshow("Raw Frame", frames.at(i));
+		pthread_t surfThread;
+		struct thread_data surfThreadData;
+	    surfThreadData.i = i;
+	    int surfThreadRC = pthread_create(&surfThread, NULL, computeSURFThread, (void *)&surfThreadData);
+	    if (surfThreadRC)
+	    {
+	    	cout << "Error:unable to create thread," << surfThreadRC << endl;
+	    	exit(-1);
+	    }
 
-		//compute SURF
-		vectNumberOfKeyPoints.push_back(computeSURF(frames, i));
-		String numberOfKeyPointsSURF = convertToString(vectNumberOfKeyPoints.at(i));
+		pthread_t cannyThread;
+		struct thread_data cannyThreadData;
+		cannyThreadData.i = i;
+	    int cannyThreadRC = pthread_create(&cannyThread, NULL, computeCannyThread, (void *)&cannyThreadData);
 
-		//compute Harris
-		numberOfHarrisCorners.push_back(computeHarris(grayFrames, frames, i));
-		String strNumberOfHarrisCorners = convertToString(numberOfHarrisCorners.at(i));
+		if (cannyThreadRC)
+		{
+			cout << "Error:unable to create thread," << cannyThreadRC << endl;
+			exit(-1);
+		}
 
-		//compute ShiTomasi
-		numberOfShiTomasiKeyPoints.push_back(computeShiTomasi(grayFrames, i));
-		String strNumberOfShiTomasiCorners = convertToString(numberOfShiTomasiKeyPoints.at(i));
+		pthread_t shiTomasiThread;
+		struct thread_data shiTomasiData;
+		shiTomasiData.i = i;
+		int shiTomasiRC = pthread_create(&shiTomasiThread, NULL, computeShiTomasiThread, (void *)&shiTomasiData);
 
-		//compute Canny
-		numberOfContours.push_back(computeCanny(frames, i));
-		strCanny = convertToString(numberOfContours.at(i));
+		if (shiTomasiRC)
+		{
+			cout << "Error:unable to create thread," << shiTomasiThread << endl;
+			exit(-1);
+		}
+
+		pthread_t harrisThread;
+		struct thread_data harrisData;
+		harrisData.i = i;
+		int harrisRC = pthread_create(&harrisThread, NULL, computeHarrisThread, (void *)&harrisData);
+
+		if (harrisRC)
+		{
+			cout << "Error:unable to create thread," << harrisThread << endl;
+			exit(-1);
+		}
+
+		if(i > 10)
+		{
+			pthread_t opticalFlowThread;
+			struct thread_data opticalFlowData;
+			opticalFlowData.i = i;
+			int opticalFlowRC = pthread_create(&opticalFlowThread, NULL, computeOpticalFlowAnalysisThread, (void *)&opticalFlowData);
+
+			if (opticalFlowRC)
+			{
+				cout << "Error:unable to create thread," << opticalFlowRC << endl;
+				exit(-1);
+			}
+		}
+
+		if(i<= 10)
+		{
+			while(surfThreadCompletion == 0 || cannyThreadCompletion == 0 || shiTomasiThreadCompletion == 0 || harrisCornersThreadCompletion == 0)
+			{
+			}
+		}
+		else
+		{
+			while(surfThreadCompletion == 0 || cannyThreadCompletion == 0 ||
+								shiTomasiThreadCompletion == 0 || harrisCornersThreadCompletion == 0 || opticalFlowThreadCompletion == 0)
+			{
+			}
+		}
+		shiTomasiThreadCompletion = 0;
+		surfThreadCompletion = 0;
+		cannyThreadCompletion = 0;
+		harrisCornersThreadCompletion = 0;
+		opticalFlowThreadCompletion = 0;
+
+		//write Canny
+		numberOfContours.push_back(numberOfContoursThread);
+		strCanny = to_string(numberOfContours.at(i));
+
+		//write ShiTomasi
+		numberOfShiTomasiKeyPoints.push_back(shiTomasiFeatures);
+		String strNumberOfShiTomasiCorners = to_string(shiTomasiFeatures);
+
+		//write SURF
+		vectNumberOfKeyPoints.push_back(numberOfSURFFeatures);
+		String numberOfKeyPointsSURF = to_string(numberOfSURFFeatures);
+
+		//write Harris
+		numberOfHarrisCorners.push_back(numberOfHarrisCornersCounter);
+		String strNumberOfHarrisCorners = to_string(numberOfHarrisCornersCounter);
 
 		//if ready for OFA
 		if(i > 10)
 		{
+			opticalFlowAnalysisFarnebackNumbers.push_back(sumOpticalFlow);
+			strNumberOpticalFlowAnalysis = to_string(sumOpticalFlow);
 			//compute FDOFA
-			opticalFlowAnalysisFarnebackNumbers.push_back(computeOpticalFlowAnalysis(*framesForOFA.at(q-1), *framesForOFA.at(q-2), i, FRAME_HEIGHT, FRAME_WIDTH));
-			strNumberOpticalFlowAnalysis = convertToString(computeOpticalFlowAnalysis(*framesForOFA.at(q-1),  *framesForOFA.at(q-2), i, FRAME_HEIGHT, FRAME_WIDTH));
-			strRating = to_string(computeFinalScore(vectNumberOfKeyPoints, numberOfHarrisCorners, numberOfShiTomasiKeyPoints, numberOfContours,
-					computeOpticalFlowAnalysis(*framesForOFA.at(q-1),  *framesForOFA.at(q-2), i, FRAME_HEIGHT, FRAME_WIDTH), i));
+			//logOpticalFlowAnalysisFarnebackNumbers.push_back(calcLogVector(opticalFlowAnalysisFarnebackNumbers.at(i-11)));
+			finalScores.push_back(computeFinalScore(vectNumberOfKeyPoints, numberOfHarrisCorners, numberOfShiTomasiKeyPoints, numberOfContours,
+					opticalFlowAnalysisFarnebackNumbers, i));
+			strRating = to_string(finalScores.at(i-11));
 		}
 		//if not enough data has been generated for optical flow
 		else if(i > 0 && i <= 3)
@@ -571,10 +722,10 @@ int main() {
 
 			//creating text to display
 			strDisplay = "SURF Features: " + numberOfKeyPointsSURF + " Shi-Tomasi: " + strNumberOfShiTomasiCorners + " Harris: "
-			+ strNumberOfHarrisCorners + " Canny: " + strCanny + " Frame Number: " + to_string(framesRead) +  " SFP: " + strActiveTimeDifference;
+			+ strNumberOfHarrisCorners + " Canny: " + strCanny + " Frame Number: " + to_string(framesRead);
 
 			//creating black empty image
-			Mat pic = Mat::zeros(45,2250,CV_8UC3);
+			Mat pic = Mat::zeros(45,1910,CV_8UC3);
 
 			//adding text to image
 			putText(pic, strDisplay, cvPoint(30,30),CV_FONT_HERSHEY_SIMPLEX, 1.25, cvScalar(0,255,0), 1, CV_AA, false);
@@ -588,13 +739,17 @@ int main() {
 		framesRead = (int) capture.get(CV_CAP_PROP_POS_FRAMES);
 		framesTimeLeft = (capture.get(CV_CAP_PROP_POS_MSEC)) / 1000;
 
+		clock_t tFinal = clock();
+
+		strActiveTimeDifference = to_string(calculateFPS(tStart, tFinal));
+
 		//creating text to display
-		strDisplay = "SURF Features: " + numberOfKeyPointsSURF + " Shi-Tomasi: " + strNumberOfShiTomasiCorners + " Harris: "
+		strDisplay = "SURF: " + numberOfKeyPointsSURF + " Shi-Tomasi: " + strNumberOfShiTomasiCorners + " Harris: "
 		+ strNumberOfHarrisCorners + + " Canny: " + strCanny + " FDOFA: " + strNumberOpticalFlowAnalysis +  " Frame Number: " +
-		to_string(framesRead) +  " Rating: " + strRating;
+		to_string(framesRead) +  " Rating: " + strRating +  " FPS: " + strActiveTimeDifference.substr(0, 4);
 
 		//creating black empty image
-		Mat pic = Mat::zeros(45,1850,CV_8UC3);
+		Mat pic = Mat::zeros(45,1910,CV_8UC3);
 
 		//adding text to image
 		putText(pic, strDisplay, cvPoint(30,30),CV_FONT_HERSHEY_SIMPLEX, 1, cvScalar(0,255,0), 1, CV_AA, false);
@@ -620,7 +775,9 @@ int main() {
 				//display exiting message
 				cout << "Exiting" << endl;
 
-				saveToTxtFile(FRAME_RATE, vectNumberOfKeyPoints, numberOfShiTomasiKeyPoints, numberOfContours, numberOfHarrisCorners, opticalFlowAnalysisFarnebackNumbers, filename);
+				normalizeRatings(finalScores);
+
+				saveToTxtFile(FRAME_RATE, vectNumberOfKeyPoints, numberOfShiTomasiKeyPoints, numberOfContours, numberOfHarrisCorners, logOpticalFlowAnalysisFarnebackNumbers, filename);
 
 				computeRunTime(t1, clock(), (int) capture.get(CV_CAP_PROP_POS_FRAMES));
 
@@ -676,6 +833,8 @@ int main() {
    		{
    			frames.at(i - 5) = placeHolder;
    			grayFrames.at(i - 5) = placeHolder;
+   			globalFrames.at(i - 5) = placeHolder;
+   			globalGrayFrames.at(i-5) = placeHolder;
    			delete framesForOFA.at(i - 5);
    		}
 
@@ -690,10 +849,9 @@ int main() {
 	grayFrames.clear();
 	framesForOFA.clear();
 
-	//print out debug and error information
-	cout << "Debug Information >> i = " << i << "; Error 1 encountered " << error1 << "times. " << endl;
+	normalizeRatings(finalScores);
 
-	saveToTxtFile(FRAME_RATE, vectNumberOfKeyPoints, numberOfShiTomasiKeyPoints, numberOfContours, numberOfHarrisCorners, opticalFlowAnalysisFarnebackNumbers, filename);
+	saveToTxtFile(FRAME_RATE, vectNumberOfKeyPoints, numberOfShiTomasiKeyPoints, numberOfContours, numberOfHarrisCorners, logOpticalFlowAnalysisFarnebackNumbers, filename);
 
 	computeRunTime(t1, clock(),(int) capture.get(CV_CAP_PROP_POS_FRAMES));
 
